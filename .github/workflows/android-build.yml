@@ -14,7 +14,7 @@ on:
           - ':app:assembleClone'
           - ':app:bundleRelease'
   push:
-    branches: [main]
+    branches: [main, feat/bounded-page-info-probe]
     paths:
       - .github/workflows/android-build.yml
       - .gitmodules
