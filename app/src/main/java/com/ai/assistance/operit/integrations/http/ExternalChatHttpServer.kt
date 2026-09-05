@@ -41,12 +41,15 @@ import okhttp3.RequestBody.Companion.toRequestBody
 class ExternalChatHttpServer(
     context: Context,
     private val preferences: ExternalHttpApiPreferences,
-    private val serviceScope: CoroutineScope
+    private val serviceScope: CoroutineScope,
+    pageInfoProvider: PageInfoProvider = OperitPageInfoProvider(context)
 ) : NanoHTTPD(LISTEN_HOST, preferences.getPort()) {
 
     private val appContext = context.applicationContext
     private val executor = ExternalChatRequestExecutor(appContext)
+    private val bearerAuthenticator = ExternalHttpBearerAuthenticator(preferences::getBearerToken)
     private val a2aHandler = A2aHttpHandler(appContext, serviceScope, ::requireBearerToken)
+    private val pageInfoHandler = PageInfoHttpHandler(pageInfoProvider, ::requireBearerToken)
     private val webChatBridge = WebChatHttpBridge(appContext, preferences, serviceScope)
     private val callbackClient = OkHttpClient.Builder()
         .retryOnConnectionFailure(false)
@@ -78,6 +81,7 @@ class ExternalChatHttpServer(
             session.uri == A2aHttpHandler.AGENT_CARD_PATH -> a2aHandler.handleAgentCard(session).withCors()
             session.uri == A2aHttpHandler.A2A_PATH -> a2aHandler.handleJsonRpc(session).withCors()
             session.uri == HEALTH_PATH && session.method == Method.GET -> handleHealth(session)
+            pageInfoHandler.matches(session) -> pageInfoHandler.handle(session).withCors()
             session.uri == CHAT_PATH && session.method == Method.POST -> handleChat(session)
             session.uri.startsWith(WEB_API_PREFIX) -> webChatBridge.handleApi(session)
             !session.uri.startsWith(API_PREFIX) -> webChatBridge.serveStatic(session)
@@ -377,38 +381,7 @@ class ExternalChatHttpServer(
     }
 
     private fun requireBearerToken(session: IHTTPSession): Response? {
-        val expectedToken = preferences.getBearerToken().trim()
-        if (expectedToken.isBlank()) {
-            return jsonResponse(
-                Response.Status.UNAUTHORIZED,
-                ExternalChatResult(
-                    success = false,
-                    error = "Bearer token not configured"
-                )
-            ).withCors()
-        }
-
-        val authorization = session.headers.entries.firstOrNull {
-            it.key.equals("authorization", ignoreCase = true)
-        }?.value?.trim().orEmpty()
-
-        val actualToken = if (authorization.startsWith("Bearer ", ignoreCase = true)) {
-            authorization.substringAfter(' ').trim()
-        } else {
-            ""
-        }
-
-        return if (actualToken == expectedToken) {
-            null
-        } else {
-            jsonResponse(
-                Response.Status.UNAUTHORIZED,
-                ExternalChatResult(
-                    success = false,
-                    error = "Unauthorized"
-                )
-            ).withCors()
-        }
+        return bearerAuthenticator.requireBearerToken(session)
     }
 
     private fun postCallback(callbackUrl: String, result: ExternalChatResult) {
