@@ -50,6 +50,7 @@ internal class PageInfoHttpHandler(
                 jsonResponse(
                     NanoHTTPD.Response.Status.OK,
                     PageInfoSuccessResponse(
+                        ok = true,
                         pageInfo = bounded.value,
                         truncated = bounded.truncated
                     )
@@ -70,7 +71,10 @@ internal class PageInfoHttpHandler(
     private fun errorResponse(
         status: NanoHTTPD.Response.Status,
         error: String
-    ): NanoHTTPD.Response = jsonResponse(status, PageInfoErrorResponse(error = error))
+    ): NanoHTTPD.Response = jsonResponse(
+        status,
+        PageInfoErrorResponse(ok = false, code = error)
+    )
 
     private inline fun <reified T> jsonResponse(
         status: NanoHTTPD.Response.Status,
@@ -121,13 +125,13 @@ internal class PageInfoHttpHandler(
 
 @Serializable
 private data class PageInfoSuccessResponse(
-    val ok: Boolean = true,
+    val ok: Boolean,
     val pageInfo: String,
     val truncated: Boolean
 )
 
 @Serializable
 private data class PageInfoErrorResponse(
-    val ok: Boolean = false,
-    val error: String
+    val ok: Boolean,
+    val code: String
 )
