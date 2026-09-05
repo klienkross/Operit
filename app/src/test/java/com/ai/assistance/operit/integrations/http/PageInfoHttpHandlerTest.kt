@@ -1,7 +1,9 @@
 package com.ai.assistance.operit.integrations.http
 
+import com.ai.assistance.operit.data.model.ToolResult
 import fi.iki.elonen.NanoHTTPD
 import java.nio.charset.StandardCharsets
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.jsonObject
@@ -37,6 +39,7 @@ class PageInfoHttpHandlerTest {
             body.getValue("pageInfo").jsonPrimitive.content
         )
         assertFalse(body.getValue("truncated").jsonPrimitive.boolean)
+        assertEquals(setOf("ok", "pageInfo", "truncated"), body.keys)
     }
 
     @Test
@@ -106,9 +109,30 @@ class PageInfoHttpHandlerTest {
 
             assertEquals(expected.first, response.status)
             assertFalse(body.getValue("ok").jsonPrimitive.boolean)
-            assertEquals(expected.second, body.getValue("error").jsonPrimitive.content)
+            assertEquals(expected.second, body.getValue("code").jsonPrimitive.content)
             assertNull(body["pageInfo"])
+            assertEquals(setOf("ok", "code"), body.keys)
         }
+    }
+
+    @Test
+    fun `provider timeout returns unavailable instead of waiting for the client`() {
+        val provider = OperitPageInfoProvider(
+            readPageInfo = { CompletableDeferred<ToolResult>().await() },
+            timeoutMillis = 25L
+        )
+        val handler = PageInfoHttpHandler(
+            pageInfoProvider = provider,
+            requireBearerToken = { null }
+        )
+
+        val response = handler.handle(getSession())
+        val body = response.jsonBody()
+
+        assertEquals(NanoHTTPD.Response.Status.SERVICE_UNAVAILABLE, response.status)
+        assertEquals(false, body.getValue("ok").jsonPrimitive.boolean)
+        assertEquals("unavailable", body.getValue("code").jsonPrimitive.content)
+        assertEquals(setOf("ok", "code"), body.keys)
     }
 
     @Test
@@ -131,7 +155,7 @@ class PageInfoHttpHandlerTest {
         val rejected = handler.handle(scriptedGet)
 
         assertEquals(NanoHTTPD.Response.Status.BAD_REQUEST, rejected.status)
-        assertEquals("invalid_request", rejected.jsonBody().getValue("error").jsonPrimitive.content)
+        assertEquals("invalid_request", rejected.jsonBody().getValue("code").jsonPrimitive.content)
         assertEquals(0, providerCalls)
     }
 

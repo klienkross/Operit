@@ -4,11 +4,27 @@ import com.ai.assistance.operit.core.tools.SimplifiedUINode
 import com.ai.assistance.operit.core.tools.StringResultData
 import com.ai.assistance.operit.core.tools.UIPageResultData
 import com.ai.assistance.operit.data.model.ToolResult
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.test.currentTime
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
+@OptIn(ExperimentalCoroutinesApi::class)
 class OperitPageInfoProviderTest {
+    @Test
+    fun `page info read is bounded at the real await boundary`() = runTest {
+        val provider = OperitPageInfoProvider {
+            CompletableDeferred<ToolResult>().await()
+        }
+
+        val result = provider.getCurrentPageInfo()
+
+        assertEquals(PageInfoProviderResult.Unavailable, result)
+        assertEquals(OperitPageInfoProvider.PAGE_INFO_TIMEOUT_MS, currentTime)
+    }
+
     @Test
     fun `successful host page result is formatted like UINode current page`() = runTest {
         val hostResult = UIPageResultData(
@@ -40,6 +56,22 @@ class OperitPageInfoProviderTest {
         )
 
         assertEquals(PageInfoProviderResult.Unavailable, provider.getCurrentPageInfo())
+    }
+
+    @Test
+    fun `confirmed connection refused host failure maps to unavailable`() = runTest {
+        val provider = providerFailure(
+            "Error getting page info: Failed to connect to /127.0.0.1:54321"
+        )
+
+        assertEquals(PageInfoProviderResult.Unavailable, provider.getCurrentPageInfo())
+    }
+
+    @Test
+    fun `unrelated host failure remains execution error`() = runTest {
+        val provider = providerFailure("Error getting page info: invalid response")
+
+        assertEquals(PageInfoProviderResult.ExecutionError, provider.getCurrentPageInfo())
     }
 
     @Test
