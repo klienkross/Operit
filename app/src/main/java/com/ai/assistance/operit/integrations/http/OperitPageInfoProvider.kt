@@ -10,8 +10,8 @@ import java.util.Locale
 import kotlinx.coroutines.withTimeoutOrNull
 
 internal class OperitPageInfoProvider(
-    private val readPageInfo: suspend () -> ToolResult,
-    private val timeoutMillis: Long = PAGE_INFO_TIMEOUT_MS
+    private val timeoutMillis: Long = PAGE_INFO_TIMEOUT_MS,
+    private val readPageInfo: suspend () -> ToolResult
 ) : PageInfoProvider {
     constructor(context: Context) : this(
         readPageInfo = {
