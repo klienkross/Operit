@@ -9,9 +9,10 @@ import java.net.ConnectException
 import java.util.Locale
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.ExecutorService
-import java.util.concurrent.Executors
 import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.SynchronousQueue
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeoutException
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.runBlocking
@@ -21,9 +22,15 @@ internal class OperitPageInfoProvider(
     private val readPageInfo: suspend () -> ToolResult
 ) : PageInfoProvider, AutoCloseable {
     private val workerBusy = AtomicBoolean(false)
-    private val worker: ExecutorService = Executors.newSingleThreadExecutor { runnable ->
-        Thread(runnable, "operit-page-info-probe").apply { isDaemon = true }
-    }
+    private val worker: ExecutorService = ThreadPoolExecutor(
+        1,
+        1,
+        0L,
+        TimeUnit.MILLISECONDS,
+        SynchronousQueue(),
+        { runnable -> Thread(runnable, "operit-page-info-probe").apply { isDaemon = true } },
+        ThreadPoolExecutor.AbortPolicy()
+    )
 
     constructor(context: Context) : this(
         readPageInfo = {
@@ -54,10 +61,11 @@ internal class OperitPageInfoProvider(
         val result = try {
             future.get(timeoutMillis, TimeUnit.MILLISECONDS)
         } catch (_: TimeoutException) {
-            future.cancel(true)
+            // Do not cancel: the suspend implementation may have dispatched blocking work to
+            // another thread. Keeping this wrapper alive keeps workerBusy true until that real
+            // coroutine completes, preventing accumulation of orphaned reads.
             return PageInfoProviderResult.Unavailable
         } catch (_: InterruptedException) {
-            future.cancel(true)
             Thread.currentThread().interrupt()
             return PageInfoProviderResult.ExecutionError
         } catch (e: ExecutionException) {
@@ -115,7 +123,7 @@ internal class OperitPageInfoProvider(
     }
 
     companion object {
-        const val PAGE_INFO_TIMEOUT_MS = 3_000L
+        const val PAGE_INFO_TIMEOUT_MS = 2_500L
 
         const val PAGE_INFO_TOOL_NAME = "get_page_info"
         private val LOCAL_CONNECT_FAILURE =
