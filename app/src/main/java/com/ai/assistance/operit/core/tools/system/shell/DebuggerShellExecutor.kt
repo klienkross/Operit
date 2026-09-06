@@ -3,6 +3,7 @@ package com.ai.assistance.operit.core.tools.system.shell
 import android.content.Context
 import android.os.ParcelFileDescriptor
 import android.os.RemoteException
+import android.os.SystemClock
 import com.ai.assistance.operit.util.AppLogger
 import com.ai.assistance.operit.core.tools.system.AndroidPermissionLevel
 import com.ai.assistance.operit.core.tools.system.ShizukuAuthorizer
@@ -29,6 +30,7 @@ import kotlinx.coroutines.isActive
 class DebuggerShellExecutor(private val context: Context) : ShellExecutor {
     companion object {
         private const val TAG = "DebuggerShellExecutor"
+        private const val PAGE_INFO_PROBE_TAG = "PageInfoProbe"
         private val serviceCache = ConcurrentHashMap<Int, IShizukuService>()
 
         /** 添加状态变更监听器 */
@@ -227,7 +229,9 @@ class DebuggerShellExecutor(private val context: Context) : ShellExecutor {
                     val commandParts = parseCommand(command)
 
                     // 创建进程
-                    process = service.newProcess(commandParts, null, null)
+                    process = tracePageInfoBoundary(command, "binder_new_process") {
+                        service.newProcess(commandParts, null, null)
+                    }
 
                     if (process == null) {
                         return@withContext ShellExecutor.CommandResult(
@@ -239,35 +243,41 @@ class DebuggerShellExecutor(private val context: Context) : ShellExecutor {
 
                     // 将ParcelFileDescriptor转换为InputStream
                     val processClass = process::class.java
-                    val inputStream =
-                            processClass.getMethod("getInputStream").invoke(process) as
-                                    ParcelFileDescriptor?
-                    val errorStream =
-                            processClass.getMethod("getErrorStream").invoke(process) as
-                                    ParcelFileDescriptor?
+                    val inputStream = tracePageInfoBoundary(command, "binder_get_stdout") {
+                        processClass.getMethod("getInputStream").invoke(process) as ParcelFileDescriptor?
+                    }
+                    val errorStream = tracePageInfoBoundary(command, "binder_get_stderr") {
+                        processClass.getMethod("getErrorStream").invoke(process) as ParcelFileDescriptor?
+                    }
 
                     // 使用重试逻辑读取标准输出和错误输出
                     val stdout =
                             if (inputStream != null) {
-                                retryOperation {
-                                    val stdoutStream = FileInputStream(inputStream.fileDescriptor)
-                                    BufferedReader(InputStreamReader(stdoutStream)).use {
-                                        it.readText()
+                                tracePageInfoBoundary(command, "stdout_read") {
+                                    retryOperation {
+                                        val stdoutStream = FileInputStream(inputStream.fileDescriptor)
+                                        BufferedReader(InputStreamReader(stdoutStream)).use {
+                                            it.readText()
+                                        }
                                     }
                                 }
                             } else ""
 
                     val stderr =
                             if (errorStream != null) {
-                                retryOperation {
-                                    val stderrStream = FileInputStream(errorStream.fileDescriptor)
-                                    BufferedReader(InputStreamReader(stderrStream)).use {
-                                        it.readText()
+                                tracePageInfoBoundary(command, "stderr_read") {
+                                    retryOperation {
+                                        val stderrStream = FileInputStream(errorStream.fileDescriptor)
+                                        BufferedReader(InputStreamReader(stderrStream)).use {
+                                            it.readText()
+                                        }
                                     }
                                 }
                             } else ""
 
-                    val exitCode = processClass.getMethod("waitFor").invoke(process) as Int
+                    val exitCode = tracePageInfoBoundary(command, "process_wait_for") {
+                        processClass.getMethod("waitFor").invoke(process) as Int
+                    }
 
                     // 返回结果
                     return@withContext ShellExecutor.CommandResult(
@@ -357,7 +367,9 @@ class DebuggerShellExecutor(private val context: Context) : ShellExecutor {
 
                     // 创建进程
                     val process =
-                            service.newProcess(shellArgs, null, null)
+                            tracePageInfoBoundary(command, "binder_new_process") {
+                                service.newProcess(shellArgs, null, null)
+                            }
                                     ?: return@withContext ShellExecutor.CommandResult(
                                             false,
                                             "",
@@ -365,12 +377,12 @@ class DebuggerShellExecutor(private val context: Context) : ShellExecutor {
                                     )
                     // 处理输入输出流
                     val processClass = process::class.java
-                    val inputStream =
-                            processClass.getMethod("getInputStream").invoke(process) as
-                                    ParcelFileDescriptor?
-                    val errorStream =
-                            processClass.getMethod("getErrorStream").invoke(process) as
-                                    ParcelFileDescriptor?
+                    val inputStream = tracePageInfoBoundary(command, "binder_get_stdout") {
+                        processClass.getMethod("getInputStream").invoke(process) as ParcelFileDescriptor?
+                    }
+                    val errorStream = tracePageInfoBoundary(command, "binder_get_stderr") {
+                        processClass.getMethod("getErrorStream").invoke(process) as ParcelFileDescriptor?
+                    }
 
                     if (isBackground) {
                         AppLogger.d(TAG, "Detected background shell command (ending with '&'), not waiting for process")
@@ -398,25 +410,31 @@ class DebuggerShellExecutor(private val context: Context) : ShellExecutor {
                     // 使用重试逻辑读取标准输出和错误输出
                     val stdout =
                             if (inputStream != null) {
-                                retryOperation {
-                                    val stdoutStream = FileInputStream(inputStream.fileDescriptor)
-                                    BufferedReader(InputStreamReader(stdoutStream)).use {
-                                        it.readText()
+                                tracePageInfoBoundary(command, "stdout_read") {
+                                    retryOperation {
+                                        val stdoutStream = FileInputStream(inputStream.fileDescriptor)
+                                        BufferedReader(InputStreamReader(stdoutStream)).use {
+                                            it.readText()
+                                        }
                                     }
                                 }
                             } else ""
 
                     val stderr =
                             if (errorStream != null) {
-                                retryOperation {
-                                    val stderrStream = FileInputStream(errorStream.fileDescriptor)
-                                    BufferedReader(InputStreamReader(stderrStream)).use {
-                                        it.readText()
+                                tracePageInfoBoundary(command, "stderr_read") {
+                                    retryOperation {
+                                        val stderrStream = FileInputStream(errorStream.fileDescriptor)
+                                        BufferedReader(InputStreamReader(stderrStream)).use {
+                                            it.readText()
+                                        }
                                     }
                                 }
                             } else ""
 
-                    val exitCode = processClass.getMethod("waitFor").invoke(process) as Int
+                    val exitCode = tracePageInfoBoundary(command, "process_wait_for") {
+                        processClass.getMethod("waitFor").invoke(process) as Int
+                    }
 
                     // 关闭文件描述符
                     try {
@@ -452,6 +470,47 @@ class DebuggerShellExecutor(private val context: Context) : ShellExecutor {
                     return@withContext ShellExecutor.CommandResult(false, "", "Error: ${e.message}")
                 }
             }
+
+    private suspend fun <T> tracePageInfoBoundary(
+        command: String,
+        boundary: String,
+        block: suspend () -> T
+    ): T {
+        val step = pageInfoCommandStep(command) ?: return block()
+        val startedAt = SystemClock.elapsedRealtime()
+        AppLogger.i(
+            PAGE_INFO_PROBE_TAG,
+            "component=DebuggerShellExecutor event=blocking_start step=$step boundary=$boundary " +
+                "thread=${Thread.currentThread().name} interrupted=${Thread.currentThread().isInterrupted}"
+        )
+        return try {
+            block().also {
+                AppLogger.i(
+                    PAGE_INFO_PROBE_TAG,
+                    "component=DebuggerShellExecutor event=blocking_end step=$step boundary=$boundary " +
+                        "elapsed_ms=${SystemClock.elapsedRealtime() - startedAt} " +
+                        "thread=${Thread.currentThread().name} interrupted=${Thread.currentThread().isInterrupted}"
+                )
+            }
+        } catch (t: Throwable) {
+            AppLogger.e(
+                PAGE_INFO_PROBE_TAG,
+                "component=DebuggerShellExecutor event=blocking_threw step=$step boundary=$boundary " +
+                    "elapsed_ms=${SystemClock.elapsedRealtime() - startedAt} " +
+                    "thread=${Thread.currentThread().name} interrupted=${Thread.currentThread().isInterrupted}",
+                t
+            )
+            throw t
+        }
+    }
+
+    private fun pageInfoCommandStep(command: String): String? = when {
+        command.startsWith("uiautomator dump") -> "uiautomator_dump"
+        command.startsWith("cat /sdcard/window_dump.xml") -> "read_window_dump"
+        command.startsWith("dumpsys window") -> "dumpsys_window"
+        command.startsWith("dumpsys activity") -> "dumpsys_activity"
+        else -> null
+    }
 
     /** 获取Shizuku服务 */
     private fun getShizukuService(): IShizukuService? {

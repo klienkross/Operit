@@ -1,6 +1,7 @@
 package com.ai.assistance.operit.core.tools.system
 
 import android.content.Context
+import android.os.SystemClock
 import com.ai.assistance.operit.util.AppLogger
 import com.ai.assistance.operit.core.tools.system.shell.ShellExecutor
 import com.ai.assistance.operit.core.tools.system.shell.ShellExecutorFactory
@@ -93,11 +94,108 @@ class AndroidShellExecutor {
             val actualLevel = preferredLevel ?: AndroidPermissionLevel.STANDARD
 
             val preferredExecutor = ShellExecutorFactory.getExecutor(ctx, actualLevel)
-            val permStatus = preferredExecutor.hasPermission()
-            val executorAvailable = preferredExecutor.isAvailable()
+            val pageInfoStep = pageInfoCommandStep(command)
+            val permissionStartedAt = SystemClock.elapsedRealtime()
+            if (pageInfoStep != null) {
+                AppLogger.i(
+                    PAGE_INFO_PROBE_TAG,
+                    "component=AndroidShellExecutor event=blocking_start boundary=has_permission " +
+                        "step=$pageInfoStep permission=$actualLevel executor=${preferredExecutor.javaClass.name} " +
+                        "identity=$identity thread=${Thread.currentThread().name} " +
+                        "interrupted=${Thread.currentThread().isInterrupted}"
+                )
+            }
+            val permStatus = try {
+                preferredExecutor.hasPermission()
+            } catch (t: Throwable) {
+                if (pageInfoStep != null) {
+                    AppLogger.e(
+                        PAGE_INFO_PROBE_TAG,
+                        "component=AndroidShellExecutor event=blocking_threw boundary=has_permission " +
+                            "step=$pageInfoStep elapsed_ms=${SystemClock.elapsedRealtime() - permissionStartedAt} " +
+                            "thread=${Thread.currentThread().name} interrupted=${Thread.currentThread().isInterrupted}",
+                        t
+                    )
+                }
+                throw t
+            }
+            if (pageInfoStep != null) {
+                AppLogger.i(
+                    PAGE_INFO_PROBE_TAG,
+                    "component=AndroidShellExecutor event=blocking_end boundary=has_permission " +
+                        "step=$pageInfoStep granted=${permStatus.granted} " +
+                        "elapsed_ms=${SystemClock.elapsedRealtime() - permissionStartedAt} " +
+                        "thread=${Thread.currentThread().name} interrupted=${Thread.currentThread().isInterrupted}"
+                )
+            }
+
+            val availabilityStartedAt = SystemClock.elapsedRealtime()
+            if (pageInfoStep != null) {
+                AppLogger.i(
+                    PAGE_INFO_PROBE_TAG,
+                    "component=AndroidShellExecutor event=blocking_start boundary=is_available " +
+                        "step=$pageInfoStep executor=${preferredExecutor.javaClass.name} " +
+                        "thread=${Thread.currentThread().name} interrupted=${Thread.currentThread().isInterrupted}"
+                )
+            }
+            val executorAvailable = try {
+                preferredExecutor.isAvailable()
+            } catch (t: Throwable) {
+                if (pageInfoStep != null) {
+                    AppLogger.e(
+                        PAGE_INFO_PROBE_TAG,
+                        "component=AndroidShellExecutor event=blocking_threw boundary=is_available " +
+                            "step=$pageInfoStep elapsed_ms=${SystemClock.elapsedRealtime() - availabilityStartedAt} " +
+                            "thread=${Thread.currentThread().name} interrupted=${Thread.currentThread().isInterrupted}",
+                        t
+                    )
+                }
+                throw t
+            }
+            if (pageInfoStep != null) {
+                AppLogger.i(
+                    PAGE_INFO_PROBE_TAG,
+                    "component=AndroidShellExecutor event=blocking_end boundary=is_available " +
+                        "step=$pageInfoStep available=$executorAvailable " +
+                        "elapsed_ms=${SystemClock.elapsedRealtime() - availabilityStartedAt} " +
+                        "thread=${Thread.currentThread().name} interrupted=${Thread.currentThread().isInterrupted}"
+                )
+            }
 
             if (executorAvailable && permStatus.granted) {
-                val result = preferredExecutor.executeCommand(command, identity)
+                val executionStartedAt = SystemClock.elapsedRealtime()
+                if (pageInfoStep != null) {
+                    AppLogger.i(
+                        PAGE_INFO_PROBE_TAG,
+                        "component=AndroidShellExecutor event=blocking_start boundary=execute_command " +
+                            "step=$pageInfoStep permission=$actualLevel executor=${preferredExecutor.javaClass.name} " +
+                            "identity=$identity thread=${Thread.currentThread().name} " +
+                            "interrupted=${Thread.currentThread().isInterrupted}"
+                    )
+                }
+                val result = try {
+                    preferredExecutor.executeCommand(command, identity)
+                } catch (t: Throwable) {
+                    if (pageInfoStep != null) {
+                        AppLogger.e(
+                            PAGE_INFO_PROBE_TAG,
+                            "component=AndroidShellExecutor event=blocking_threw boundary=execute_command " +
+                                "step=$pageInfoStep elapsed_ms=${SystemClock.elapsedRealtime() - executionStartedAt} " +
+                                "thread=${Thread.currentThread().name} interrupted=${Thread.currentThread().isInterrupted}",
+                            t
+                        )
+                    }
+                    throw t
+                }
+                if (pageInfoStep != null) {
+                    AppLogger.i(
+                        PAGE_INFO_PROBE_TAG,
+                        "component=AndroidShellExecutor event=blocking_end boundary=execute_command " +
+                            "step=$pageInfoStep success=${result.success} exit_code=${result.exitCode} " +
+                            "elapsed_ms=${SystemClock.elapsedRealtime() - executionStartedAt} " +
+                            "thread=${Thread.currentThread().name} interrupted=${Thread.currentThread().isInterrupted}"
+                    )
+                }
                 return CommandResult(result.success, result.stdout, result.stderr, result.exitCode)
             }
 
@@ -105,6 +203,14 @@ class AndroidShellExecutor {
 
             AppLogger.d(TAG, "Strict permission mode enabled. $reason")
             return CommandResult(false, "", reason, -1)
+        }
+
+        private fun pageInfoCommandStep(command: String): String? = when {
+            command.startsWith("uiautomator dump") -> "uiautomator_dump"
+            command.startsWith("cat /sdcard/window_dump.xml") -> "read_window_dump"
+            command.startsWith("dumpsys window") -> "dumpsys_window"
+            command.startsWith("dumpsys activity") -> "dumpsys_activity"
+            else -> null
         }
 
         suspend fun startShellProcess(command: String): ShellProcess {
@@ -125,6 +231,8 @@ class AndroidShellExecutor {
             AppLogger.d(TAG, "Strict permission mode enabled. $reason")
             throw SecurityException(reason)
         }
+
+        private const val PAGE_INFO_PROBE_TAG = "PageInfoProbe"
     }
 
     /** 命令执行结果数据类 */

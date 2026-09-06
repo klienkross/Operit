@@ -1,20 +1,47 @@
 package com.ai.assistance.operit.integrations.http
 
+import com.ai.assistance.operit.core.tools.SimplifiedUINode
+import com.ai.assistance.operit.core.tools.UIPageResultData
+import com.ai.assistance.operit.data.model.ToolResult
+import com.ai.assistance.operit.util.AppLogger
 import fi.iki.elonen.NanoHTTPD
 import java.nio.charset.StandardCharsets
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Before
 import org.junit.Test
 import org.mockito.kotlin.mock
 import org.mockito.kotlin.whenever
+import kotlin.system.measureTimeMillis
 
 class PageInfoHttpHandlerTest {
+    private var previousSystemLogEnabled = true
+
+    @Before
+    fun disableAndroidSystemLog() {
+        previousSystemLogEnabled = AppLogger.enableSystemLog
+        AppLogger.enableSystemLog = false
+    }
+
+    @After
+    fun restoreAndroidSystemLog() {
+        AppLogger.enableSystemLog = previousSystemLogEnabled
+    }
+
     @Test
     fun `authenticated GET returns current page info`() {
         val authenticator = ExternalHttpBearerAuthenticator { "secret-token" }
@@ -37,6 +64,7 @@ class PageInfoHttpHandlerTest {
             body.getValue("pageInfo").jsonPrimitive.content
         )
         assertFalse(body.getValue("truncated").jsonPrimitive.boolean)
+        assertEquals(setOf("ok", "pageInfo", "truncated"), body.keys)
     }
 
     @Test
@@ -106,8 +134,97 @@ class PageInfoHttpHandlerTest {
 
             assertEquals(expected.first, response.status)
             assertFalse(body.getValue("ok").jsonPrimitive.boolean)
-            assertEquals(expected.second, body.getValue("error").jsonPrimitive.content)
+            assertEquals(expected.second, body.getValue("code").jsonPrimitive.content)
             assertNull(body["pageInfo"])
+            assertEquals(setOf("ok", "code"), body.keys)
+        }
+    }
+
+    @Test
+    fun `provider timeout returns unavailable instead of waiting for the client`() {
+        val provider = OperitPageInfoProvider(
+            readPageInfo = { CompletableDeferred<ToolResult>().await() },
+            timeoutMillis = 25L
+        )
+        val handler = PageInfoHttpHandler(
+            pageInfoProvider = provider,
+            requireBearerToken = { null }
+        )
+
+        val response = handler.handle(getSession())
+        val body = response.jsonBody()
+
+        assertEquals(NanoHTTPD.Response.Status.SERVICE_UNAVAILABLE, response.status)
+        assertEquals(false, body.getValue("ok").jsonPrimitive.boolean)
+        assertEquals("unavailable", body.getValue("code").jsonPrimitive.content)
+        assertEquals(setOf("ok", "code"), body.keys)
+        provider.close()
+    }
+
+    @Test
+    fun `interrupt ignoring read leaves worker occupied without queueing more work`() {
+        val releaseFirstRead = CountDownLatch(1)
+        val readCalls = AtomicInteger(0)
+        val hostResult = UIPageResultData(
+            packageName = "com.example",
+            activityName = ".MainActivity",
+            uiElements = SimplifiedUINode(
+                className = "FrameLayout",
+                text = null,
+                contentDesc = null,
+                resourceId = null,
+                bounds = "[0,0][10,10]",
+                isClickable = false,
+                children = emptyList()
+            )
+        )
+        val provider = OperitPageInfoProvider(timeoutMillis = 250L) {
+            withContext(Dispatchers.IO) {
+                if (readCalls.incrementAndGet() == 1) {
+                    while (releaseFirstRead.count > 0) {
+                        try {
+                            releaseFirstRead.await()
+                        } catch (_: InterruptedException) {
+                            // Models a dispatched backend that ignores cancellation/interrupt.
+                        }
+                    }
+                }
+                ToolResult("get_page_info", true, hostResult)
+            }
+        }
+        val handler = PageInfoHttpHandler(provider, requireBearerToken = { null })
+        val requestExecutor = Executors.newSingleThreadExecutor()
+
+        try {
+            val firstElapsed = measureTimeMillis {
+                val response = requestExecutor
+                    .submit<NanoHTTPD.Response> { handler.handle(getSession()) }
+                    .get(1, TimeUnit.SECONDS)
+                assertUnavailable(response)
+            }
+            assertTrue("first request was not bounded: ${firstElapsed}ms", firstElapsed < 1_000L)
+
+            val secondElapsed = measureTimeMillis {
+                assertUnavailable(handler.handle(getSession()))
+            }
+            assertTrue("occupied worker did not reject immediately: ${secondElapsed}ms", secondElapsed < 100L)
+            assertEquals(1, readCalls.get())
+
+            releaseFirstRead.countDown()
+            val deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
+            var response: NanoHTTPD.Response
+            do {
+                response = handler.handle(getSession())
+                if (response.status == NanoHTTPD.Response.Status.OK) break
+                Thread.sleep(10L)
+            } while (System.nanoTime() < deadlineNanos)
+
+            assertEquals(NanoHTTPD.Response.Status.OK, response.status)
+            assertEquals(2, readCalls.get())
+        } finally {
+            releaseFirstRead.countDown()
+            requestExecutor.shutdownNow()
+            provider.close()
         }
     }
 
@@ -131,7 +248,7 @@ class PageInfoHttpHandlerTest {
         val rejected = handler.handle(scriptedGet)
 
         assertEquals(NanoHTTPD.Response.Status.BAD_REQUEST, rejected.status)
-        assertEquals("invalid_request", rejected.jsonBody().getValue("error").jsonPrimitive.content)
+        assertEquals("invalid_request", rejected.jsonBody().getValue("code").jsonPrimitive.content)
         assertEquals(0, providerCalls)
     }
 
@@ -140,6 +257,14 @@ class PageInfoHttpHandlerTest {
             pageInfoProvider = PageInfoProvider { PageInfoProviderResult.Available(pageInfo) },
             requireBearerToken = { null }
         )
+
+    private fun assertUnavailable(response: NanoHTTPD.Response) {
+        val body = response.jsonBody()
+        assertEquals(NanoHTTPD.Response.Status.SERVICE_UNAVAILABLE, response.status)
+        assertFalse(body.getValue("ok").jsonPrimitive.boolean)
+        assertEquals("unavailable", body.getValue("code").jsonPrimitive.content)
+        assertEquals(setOf("ok", "code"), body.keys)
+    }
 
     private fun getSession(
         parameters: Map<String, List<String>> = emptyMap(),
