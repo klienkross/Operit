@@ -3,6 +3,7 @@ package com.ai.assistance.operit.core.tools.defaultTool.root
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.os.SystemClock
 import com.ai.assistance.operit.util.AppLogger
 import com.ai.assistance.operit.core.tools.SimplifiedUINode
 import com.ai.assistance.operit.core.tools.StringResultData
@@ -28,6 +29,7 @@ open class RootUITools(context: Context) : AdminUITools(context) {
 
     companion object {
         private const val TAG = "RootUITools"
+        private const val PAGE_INFO_PROBE_TAG = "PageInfoProbe"
     }
 
     override val uiShellIdentity: ShellIdentity = ShellIdentity.SHELL
@@ -360,17 +362,32 @@ open class RootUITools(context: Context) : AdminUITools(context) {
 
     /** Gets page info using uiautomator dump and dumpsys. */
     override suspend fun getPageInfo(tool: AITool): ToolResult {
+        val requestId = pageInfoProbeRequestId(tool)
+        val startedAt = SystemClock.elapsedRealtime()
+        AppLogger.i(
+            PAGE_INFO_PROBE_TAG,
+            "component=RootUITools event=get_page_info_start request_id=$requestId " +
+                "implementation=${javaClass.name} method=RootUITools.getPageInfo path=root_shell " +
+                "thread=${Thread.currentThread().name} interrupted=${Thread.currentThread().isInterrupted}"
+        )
         return try {
-            val uiData = getUIDataFromShell(tool)
+            val uiData = getUIDataFromShell(tool, requestId)
                 ?: return ToolResult(
                     toolName = tool.name,
                     success = false,
                     result = StringResultData(""),
                     error = "Failed to retrieve UI data."
-                )
+                ).also { result -> logPageInfoEnd(requestId, startedAt, result) }
 
+            val parseStartedAt = SystemClock.elapsedRealtime()
+            AppLogger.i(PAGE_INFO_PROBE_TAG, "component=RootUITools event=stage_start request_id=$requestId stage=parse_result")
             val focusInfo = extractFocusInfoFromShell(uiData.windowInfo)
             val simplifiedLayout = simplifyLayoutFromXml(uiData.uiXml)
+            AppLogger.i(
+                PAGE_INFO_PROBE_TAG,
+                "component=RootUITools event=stage_end request_id=$requestId stage=parse_result " +
+                    "elapsed_ms=${SystemClock.elapsedRealtime() - parseStartedAt}"
+            )
 
             val resultData =
                 UIPageResultData(
@@ -381,6 +398,13 @@ open class RootUITools(context: Context) : AdminUITools(context) {
 
             ToolResult(toolName = tool.name, success = true, result = resultData, error = "")
         } catch (e: Exception) {
+            AppLogger.e(
+                PAGE_INFO_PROBE_TAG,
+                "component=RootUITools event=get_page_info_caught request_id=$requestId " +
+                    "elapsed_ms=${SystemClock.elapsedRealtime() - startedAt} " +
+                    "thread=${Thread.currentThread().name} interrupted=${Thread.currentThread().isInterrupted}",
+                e
+            )
             AppLogger.e(TAG, "Error getting page info", e)
             ToolResult(
                 toolName = tool.name,
@@ -388,12 +412,25 @@ open class RootUITools(context: Context) : AdminUITools(context) {
                 result = StringResultData(""),
                 error = "Error getting page info: ${e.message}"
             )
+        }.also { result ->
+            logPageInfoEnd(requestId, startedAt, result)
         }
+    }
+
+    private fun logPageInfoEnd(requestId: String, startedAt: Long, result: ToolResult) {
+        AppLogger.i(
+            PAGE_INFO_PROBE_TAG,
+            "component=RootUITools event=get_page_info_end request_id=$requestId path=root_shell " +
+                "implementation=${javaClass.name} success=${result.success} " +
+                "result_type=${result.result.javaClass.name} " +
+                "elapsed_ms=${SystemClock.elapsedRealtime() - startedAt} " +
+                "thread=${Thread.currentThread().name} interrupted=${Thread.currentThread().isInterrupted}"
+        )
     }
 
     private data class UIData(val uiXml: String, val windowInfo: String)
 
-    private suspend fun getUIDataFromShell(tool: AITool): UIData? {
+    private suspend fun getUIDataFromShell(tool: AITool, requestId: String): UIData? {
         return try {
             AppLogger.d(TAG, "Getting UI data via ADB")
 
@@ -406,14 +443,22 @@ open class RootUITools(context: Context) : AdminUITools(context) {
             var dumpResult = if (displayId != null) {
                 val cmd = "uiautomator dump --display-id $displayId /sdcard/window_dump.xml"
                 AppLogger.d(TAG, "UI dump using explicit display-id=$displayId")
-                executeUiShellCommand(cmd)
+                executePageInfoShellCommand(requestId, "uiautomator_dump_display", cmd)
             } else {
-                executeUiShellCommand("uiautomator dump /sdcard/window_dump.xml")
+                executePageInfoShellCommand(
+                    requestId,
+                    "uiautomator_dump",
+                    "uiautomator dump /sdcard/window_dump.xml"
+                )
             }
 
             if (!dumpResult.success && displayId != null) {
                 AppLogger.w(TAG, "uiautomator dump with explicit display-id failed, falling back: ${dumpResult.stderr}")
-                dumpResult = executeUiShellCommand("uiautomator dump /sdcard/window_dump.xml")
+                dumpResult = executePageInfoShellCommand(
+                    requestId,
+                    "uiautomator_dump_without_display",
+                    "uiautomator dump /sdcard/window_dump.xml"
+                )
             }
 
             if (!dumpResult.success) {
@@ -421,17 +466,21 @@ open class RootUITools(context: Context) : AdminUITools(context) {
                 return null
             }
 
-            val readResult = executeUiShellCommand("cat /sdcard/window_dump.xml")
+            val readResult = executePageInfoShellCommand(
+                requestId,
+                "read_window_dump",
+                "cat /sdcard/window_dump.xml"
+            )
             if (!readResult.success) {
                 AppLogger.e(TAG, "Reading UI dump file failed: ${readResult.stderr}")
                 return null
             }
 
-            var windowInfo = getWindowInfoFromShell()
+            var windowInfo = getWindowInfoFromShell(requestId)
             if (windowInfo.isEmpty()) {
                 AppLogger.w(TAG, "Failed to get window info, retrying after 500ms")
                 delay(500)
-                windowInfo = getWindowInfoFromShell()
+                windowInfo = getWindowInfoFromShell(requestId)
             }
 
             UIData(readResult.stdout, windowInfo)
@@ -441,7 +490,7 @@ open class RootUITools(context: Context) : AdminUITools(context) {
         }
     }
 
-    private suspend fun getWindowInfoFromShell(): String {
+    private suspend fun getWindowInfoFromShell(requestId: String): String {
         val commands =
             listOf(
                 "dumpsys window windows | grep -E 'mCurrentFocus|mFocusedApp'",
@@ -450,7 +499,7 @@ open class RootUITools(context: Context) : AdminUITools(context) {
             )
         for (command in commands) {
             try {
-                val result = executeUiShellCommand(command)
+                val result = executePageInfoShellCommand(requestId, "window_info_${commands.indexOf(command) + 1}", command)
                 if (result.success && result.stdout.isNotBlank()) {
                     AppLogger.d(TAG, "Successfully got window info with: $command")
                     return result.stdout
@@ -461,6 +510,40 @@ open class RootUITools(context: Context) : AdminUITools(context) {
         }
         AppLogger.e(TAG, "All attempts to get window info failed.")
         return ""
+    }
+
+    private suspend fun executePageInfoShellCommand(
+        requestId: String,
+        step: String,
+        command: String
+    ): com.ai.assistance.operit.core.tools.system.AndroidShellExecutor.CommandResult {
+        val startedAt = SystemClock.elapsedRealtime()
+        AppLogger.i(
+            PAGE_INFO_PROBE_TAG,
+            "component=RootUITools event=blocking_start request_id=$requestId boundary=shell_command " +
+                "step=$step implementation=${javaClass.name} identity=$uiShellIdentity " +
+                "thread=${Thread.currentThread().name} interrupted=${Thread.currentThread().isInterrupted}"
+        )
+        return try {
+            executeUiShellCommand(command).also { result ->
+                AppLogger.i(
+                    PAGE_INFO_PROBE_TAG,
+                    "component=RootUITools event=blocking_end request_id=$requestId boundary=shell_command " +
+                        "step=$step success=${result.success} exit_code=${result.exitCode} " +
+                        "elapsed_ms=${SystemClock.elapsedRealtime() - startedAt} " +
+                        "thread=${Thread.currentThread().name} interrupted=${Thread.currentThread().isInterrupted}"
+                )
+            }
+        } catch (t: Throwable) {
+            AppLogger.e(
+                PAGE_INFO_PROBE_TAG,
+                "component=RootUITools event=blocking_threw request_id=$requestId boundary=shell_command " +
+                    "step=$step elapsed_ms=${SystemClock.elapsedRealtime() - startedAt} " +
+                    "thread=${Thread.currentThread().name} interrupted=${Thread.currentThread().isInterrupted}",
+                t
+            )
+            throw t
+        }
     }
 
     private data class UINodeShell(

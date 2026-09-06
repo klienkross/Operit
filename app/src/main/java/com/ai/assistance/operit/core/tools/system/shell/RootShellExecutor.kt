@@ -1,6 +1,7 @@
 package com.ai.assistance.operit.core.tools.system.shell
 
 import android.content.Context
+import android.os.SystemClock
 import com.ai.assistance.operit.util.AppLogger
 import com.ai.assistance.operit.R
 import com.ai.assistance.operit.core.tools.system.AndroidPermissionLevel
@@ -36,6 +37,7 @@ import kotlinx.coroutines.Dispatchers as CoroutineDispatchers
 class RootShellExecutor(private val context: Context) : ShellExecutor {
     companion object {
         private const val TAG = "RootShellExecutor"
+        private const val PAGE_INFO_PROBE_TAG = "PageInfoProbe"
         private var rootAvailable: Boolean? = null
         
         // 静态初始化，确保Shell配置只被设置一次
@@ -383,22 +385,30 @@ class RootShellExecutor(private val context: Context) : ShellExecutor {
                             } else {
                                 if (useExecMode) {
                                     val fullCmd = "$launcherPath $actualCommand"
-                                    val process = Runtime.getRuntime().exec(buildSuExecCommand(fullCmd))
+                                    val process = tracePageInfoBoundary(command, "runtime_exec") {
+                                        Runtime.getRuntime().exec(buildSuExecCommand(fullCmd))
+                                    }
 
                                     val stdoutReader = BufferedReader(InputStreamReader(process.inputStream))
                                     val stdout = StringBuilder()
                                     var line: String?
-                                    while (stdoutReader.readLine().also { line = it } != null) {
-                                        stdout.append(line).append("\n")
+                                    tracePageInfoBoundary(command, "stdout_read") {
+                                        while (stdoutReader.readLine().also { line = it } != null) {
+                                            stdout.append(line).append("\n")
+                                        }
                                     }
 
                                     val stderrReader = BufferedReader(InputStreamReader(process.errorStream))
                                     val stderr = StringBuilder()
-                                    while (stderrReader.readLine().also { line = it } != null) {
-                                        stderr.append(line).append("\n")
+                                    tracePageInfoBoundary(command, "stderr_read") {
+                                        while (stderrReader.readLine().also { line = it } != null) {
+                                            stderr.append(line).append("\n")
+                                        }
                                     }
 
-                                    val exitCode = process.waitFor()
+                                    val exitCode = tracePageInfoBoundary(command, "process_wait_for") {
+                                        process.waitFor()
+                                    }
 
                                     val stdoutStr = stdout.toString().trimEnd()
                                     val stderrStr = stderr.toString().trimEnd()
@@ -419,7 +429,9 @@ class RootShellExecutor(private val context: Context) : ShellExecutor {
                                     )
                                 } else {
                                     val shellCommand = "$launcherPath $actualCommand"
-                                    val shellResult = Shell.cmd(shellCommand).exec()
+                                    val shellResult = tracePageInfoBoundary(command, "libsu_exec") {
+                                        Shell.cmd(shellCommand).exec()
+                                    }
 
                                     val stdout = shellResult.out.joinToString("\n")
                                     val stderr = shellResult.err.joinToString("\n")
@@ -473,6 +485,48 @@ class RootShellExecutor(private val context: Context) : ShellExecutor {
                     )
                 }
             }
+
+    private inline fun <T> tracePageInfoBoundary(
+        command: String,
+        boundary: String,
+        block: () -> T
+    ): T {
+        val step = pageInfoCommandStep(command) ?: return block()
+        val startedAt = SystemClock.elapsedRealtime()
+        AppLogger.i(
+            PAGE_INFO_PROBE_TAG,
+            "component=RootShellExecutor event=blocking_start step=$step boundary=$boundary " +
+                "mode=${if (useExecMode) "runtime_exec" else "libsu"} " +
+                "thread=${Thread.currentThread().name} interrupted=${Thread.currentThread().isInterrupted}"
+        )
+        return try {
+            block().also {
+                AppLogger.i(
+                    PAGE_INFO_PROBE_TAG,
+                    "component=RootShellExecutor event=blocking_end step=$step boundary=$boundary " +
+                        "elapsed_ms=${SystemClock.elapsedRealtime() - startedAt} " +
+                        "thread=${Thread.currentThread().name} interrupted=${Thread.currentThread().isInterrupted}"
+                )
+            }
+        } catch (t: Throwable) {
+            AppLogger.e(
+                PAGE_INFO_PROBE_TAG,
+                "component=RootShellExecutor event=blocking_threw step=$step boundary=$boundary " +
+                    "elapsed_ms=${SystemClock.elapsedRealtime() - startedAt} " +
+                    "thread=${Thread.currentThread().name} interrupted=${Thread.currentThread().isInterrupted}",
+                t
+            )
+            throw t
+        }
+    }
+
+    private fun pageInfoCommandStep(command: String): String? = when {
+        command.startsWith("uiautomator dump") -> "uiautomator_dump"
+        command.startsWith("cat /sdcard/window_dump.xml") -> "read_window_dump"
+        command.startsWith("dumpsys window") -> "dumpsys_window"
+        command.startsWith("dumpsys activity") -> "dumpsys_activity"
+        else -> null
+    }
 
     override suspend fun startProcess(command: String): ShellProcess {
         applyExecutionModePreferenceOverride()

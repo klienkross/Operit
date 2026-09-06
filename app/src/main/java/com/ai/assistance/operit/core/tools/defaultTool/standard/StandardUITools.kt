@@ -5,6 +5,7 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.content.pm.PackageManager
 import android.media.projection.MediaProjection
+import android.os.SystemClock
 import com.ai.assistance.operit.api.chat.EnhancedAIService
 import com.ai.assistance.operit.core.config.FunctionalPrompts
 import com.ai.assistance.operit.core.tools.AutomationExecutionResult
@@ -54,6 +55,8 @@ open class StandardUITools(protected val context: Context) : ToolImplementations
 
     companion object {
         private const val TAG = "UITools"
+        private const val PAGE_INFO_PROBE_TAG = "PageInfoProbe"
+        private const val PAGE_INFO_PROBE_REQUEST_ID_PARAMETER = "page_info_probe_request_id"
         private const val COMMAND_TIMEOUT_SECONDS = 10L
         private const val OPERATION_NOT_SUPPORTED =
                 "This operation is not supported in the standard version. Please use the accessibility or debugger version."
@@ -304,13 +307,32 @@ open class StandardUITools(protected val context: Context) : ToolImplementations
 
     /** Gets the current UI page/window information */
     open suspend fun getPageInfo(tool: AITool): ToolResult {
-            return ToolResult(
+        val startedAt = SystemClock.elapsedRealtime()
+        val requestId = pageInfoProbeRequestId(tool)
+        AppLogger.i(
+            PAGE_INFO_PROBE_TAG,
+            "component=StandardUITools event=get_page_info_start request_id=$requestId " +
+                "implementation=${javaClass.name} method=StandardUITools.getPageInfo " +
+                "thread=${Thread.currentThread().name} interrupted=${Thread.currentThread().isInterrupted}"
+        )
+        return ToolResult(
                     toolName = tool.name,
                     success = false,
                     result = StringResultData(""),
                 error = OPERATION_NOT_SUPPORTED
-        )
+        ).also {
+            AppLogger.i(
+                PAGE_INFO_PROBE_TAG,
+                "component=StandardUITools event=get_page_info_end request_id=$requestId " +
+                    "implementation=${javaClass.name} success=false result_type=${it.result.javaClass.name} " +
+                    "elapsed_ms=${SystemClock.elapsedRealtime() - startedAt} " +
+                    "thread=${Thread.currentThread().name} interrupted=${Thread.currentThread().isInterrupted}"
+            )
+        }
     }
+
+    protected fun pageInfoProbeRequestId(tool: AITool): String =
+        tool.parameters.firstOrNull { it.name == PAGE_INFO_PROBE_REQUEST_ID_PARAMETER }?.value ?: "none"
 
     data class UINode(
             val className: String?,

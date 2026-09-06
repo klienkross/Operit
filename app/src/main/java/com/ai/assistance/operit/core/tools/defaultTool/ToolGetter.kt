@@ -1,6 +1,7 @@
 package com.ai.assistance.operit.core.tools.defaultTool
 
 import android.content.Context
+import com.ai.assistance.operit.util.AppLogger
 import com.ai.assistance.operit.core.tools.defaultTool.accessbility.*
 import com.ai.assistance.operit.core.tools.defaultTool.admin.*
 import com.ai.assistance.operit.core.tools.defaultTool.debugger.*
@@ -42,8 +43,9 @@ object ToolGetter {
      * @param context 应用上下文
      * @return 根据首选权限级别的UI工具实现
      */
-    fun getUITools(context: Context): StandardUITools {
-        return when (androidPermissionPreferences.getPreferredPermissionLevel()) {
+    fun getUITools(context: Context, requestId: Long? = null): StandardUITools {
+        val preferredLevel = androidPermissionPreferences.getPreferredPermissionLevel()
+        val uiTools = when (preferredLevel) {
             AndroidPermissionLevel.ROOT -> RootUITools(context)
             AndroidPermissionLevel.ADMIN -> AdminUITools(context)
             AndroidPermissionLevel.DEBUGGER -> DebuggerUITools(context)
@@ -51,6 +53,15 @@ object ToolGetter {
             AndroidPermissionLevel.STANDARD -> StandardUITools(context)
             null -> StandardUITools(context) // 默认使用标准权限级别
         }
+        if (requestId != null) {
+            AppLogger.i(
+                PAGE_INFO_PROBE_TAG,
+                "component=ToolGetter event=ui_selection request_id=$requestId " +
+                    "preferred_permission=$preferredLevel selected_class=${uiTools.javaClass.name} " +
+                    "thread=${Thread.currentThread().name} interrupted=${Thread.currentThread().isInterrupted}"
+            )
+        }
+        return uiTools
     }
 
     /**
@@ -216,4 +227,6 @@ object ToolGetter {
     fun getSoftwareSettingsModifyTools(context: Context): StandardSoftwareSettingsModifyTools {
         return StandardSoftwareSettingsModifyTools(context)
     }
+
+    private const val PAGE_INFO_PROBE_TAG = "PageInfoProbe"
 }

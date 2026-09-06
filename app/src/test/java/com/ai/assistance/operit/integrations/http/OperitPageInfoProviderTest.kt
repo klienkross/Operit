@@ -4,19 +4,35 @@ import com.ai.assistance.operit.core.tools.SimplifiedUINode
 import com.ai.assistance.operit.core.tools.StringResultData
 import com.ai.assistance.operit.core.tools.UIPageResultData
 import com.ai.assistance.operit.data.model.ToolResult
+import com.ai.assistance.operit.util.AppLogger
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.test.runTest
+import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Before
 import org.junit.Test
 
 class OperitPageInfoProviderTest {
+    private var previousSystemLogEnabled = true
+
+    @Before
+    fun disableAndroidSystemLog() {
+        previousSystemLogEnabled = AppLogger.enableSystemLog
+        AppLogger.enableSystemLog = false
+    }
+
+    @After
+    fun restoreAndroidSystemLog() {
+        AppLogger.enableSystemLog = previousSystemLogEnabled
+    }
+
     @Test
     fun `page info read is bounded at the real await boundary`() = runTest {
         val provider = OperitPageInfoProvider(timeoutMillis = 25L) {
             CompletableDeferred<ToolResult>().await()
         }
 
-        val result = provider.getCurrentPageInfo()
+        val result = provider.getCurrentPageInfo(0L)
 
         assertEquals(PageInfoProviderResult.Unavailable, result)
         provider.close()
@@ -41,7 +57,7 @@ class OperitPageInfoProviderTest {
             ToolResult("get_page_info", true, hostResult)
         }
 
-        val result = provider.getCurrentPageInfo()
+        val result = provider.getCurrentPageInfo(0L)
 
         assertEquals(PageInfoProviderResult.Available(hostResult.toString()), result)
     }
@@ -52,7 +68,7 @@ class OperitPageInfoProviderTest {
             "This operation is not supported in the standard version."
         )
 
-        assertEquals(PageInfoProviderResult.Unavailable, provider.getCurrentPageInfo())
+        assertEquals(PageInfoProviderResult.Unavailable, provider.getCurrentPageInfo(0L))
     }
 
     @Test
@@ -61,14 +77,14 @@ class OperitPageInfoProviderTest {
             "Error getting page info: Failed to connect to /127.0.0.1:54321"
         )
 
-        assertEquals(PageInfoProviderResult.Unavailable, provider.getCurrentPageInfo())
+        assertEquals(PageInfoProviderResult.Unavailable, provider.getCurrentPageInfo(0L))
     }
 
     @Test
     fun `unrelated host failure remains execution error`() = runTest {
         val provider = providerFailure("Error getting page info: invalid response")
 
-        assertEquals(PageInfoProviderResult.ExecutionError, provider.getCurrentPageInfo())
+        assertEquals(PageInfoProviderResult.ExecutionError, provider.getCurrentPageInfo(0L))
     }
 
     @Test
@@ -77,7 +93,7 @@ class OperitPageInfoProviderTest {
             "Error getting page info: Accessibility Service is not enabled."
         )
 
-        assertEquals(PageInfoProviderResult.PermissionRequired, provider.getCurrentPageInfo())
+        assertEquals(PageInfoProviderResult.PermissionRequired, provider.getCurrentPageInfo(0L))
     }
 
     @Test
@@ -87,8 +103,8 @@ class OperitPageInfoProviderTest {
         }
         val thrown = OperitPageInfoProvider { throw IllegalArgumentException("boom") }
 
-        assertEquals(PageInfoProviderResult.ExecutionError, wrongType.getCurrentPageInfo())
-        assertEquals(PageInfoProviderResult.ExecutionError, thrown.getCurrentPageInfo())
+        assertEquals(PageInfoProviderResult.ExecutionError, wrongType.getCurrentPageInfo(0L))
+        assertEquals(PageInfoProviderResult.ExecutionError, thrown.getCurrentPageInfo(0L))
     }
 
     private fun providerFailure(error: String) = OperitPageInfoProvider {

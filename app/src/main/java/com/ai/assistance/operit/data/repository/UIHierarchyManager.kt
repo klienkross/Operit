@@ -10,6 +10,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.IBinder
 import android.os.RemoteException
+import android.os.SystemClock
 import com.ai.assistance.operit.util.AppLogger
 import android.widget.Toast
 import androidx.core.content.FileProvider
@@ -39,6 +40,7 @@ import kotlinx.coroutines.sync.withLock
  */
 object UIHierarchyManager {
     private const val TAG = "UIHierarchyManager"
+    private const val PAGE_INFO_PROBE_TAG = "PageInfoProbe"
     private const val BIND_SERVICE_TIMEOUT_MS = 3000L // 3秒超时
 
     // 新的无障碍服务提供者应用的包名
@@ -163,18 +165,38 @@ object UIHierarchyManager {
      * 确保服务已绑定，如果未绑定则尝试自动重新绑定。
      * @return a boolean indicating if the service is ready.
      */
-    private suspend fun ensureBound(context: Context): Boolean {
+    private suspend fun ensureBound(context: Context, requestId: String = "none"): Boolean {
+        val startedAt = SystemClock.elapsedRealtime()
+        AppLogger.i(
+            PAGE_INFO_PROBE_TAG,
+            "component=UIHierarchyManager event=blocking_start request_id=$requestId " +
+                "boundary=ensure_bound is_bound=${_isBound.value} provider_present=${accessibilityProvider != null} " +
+                "thread=${Thread.currentThread().name} interrupted=${Thread.currentThread().isInterrupted}"
+        )
         if (!_isBound.value || accessibilityProvider == null) {
             AppLogger.w(TAG, "服务未绑定或提供者为null，尝试自动重新绑定...")
             val bound = bindToService(context)
             if (!bound) {
                 AppLogger.e(TAG, "自动重新绑定失败")
+                AppLogger.i(
+                    PAGE_INFO_PROBE_TAG,
+                    "component=UIHierarchyManager event=blocking_end request_id=$requestId " +
+                        "boundary=ensure_bound ready=false elapsed_ms=${SystemClock.elapsedRealtime() - startedAt} " +
+                        "thread=${Thread.currentThread().name} interrupted=${Thread.currentThread().isInterrupted}"
+                )
                 return false
             }
         }
         // A final check to protect against race conditions where the service disconnects
         // right after the check or during the binding process.
-        return _isBound.value && accessibilityProvider != null
+        val ready = _isBound.value && accessibilityProvider != null
+        AppLogger.i(
+            PAGE_INFO_PROBE_TAG,
+            "component=UIHierarchyManager event=blocking_end request_id=$requestId " +
+                "boundary=ensure_bound ready=$ready elapsed_ms=${SystemClock.elapsedRealtime() - startedAt} " +
+                "thread=${Thread.currentThread().name} interrupted=${Thread.currentThread().isInterrupted}"
+        )
+        return ready
     }
 
     /**
@@ -305,14 +327,36 @@ object UIHierarchyManager {
      * 从外部服务获取UI层次结构。
      * 如果服务未绑定，会尝试自动重新绑定一次。
      */
-    suspend fun getUIHierarchy(context: Context): String {
-        if (!ensureBound(context)) {
+    suspend fun getUIHierarchy(context: Context, requestId: String = "none"): String {
+        if (!ensureBound(context, requestId)) {
             AppLogger.e(TAG, "绑定失败，无法获取UI层次结构")
             return ""
         }
+        val startedAt = SystemClock.elapsedRealtime()
+        AppLogger.i(
+            PAGE_INFO_PROBE_TAG,
+            "component=UIHierarchyManager event=blocking_start request_id=$requestId " +
+                "boundary=binder_get_ui_hierarchy thread=${Thread.currentThread().name} " +
+                "interrupted=${Thread.currentThread().isInterrupted}"
+        )
         return try {
-            accessibilityProvider?.uiHierarchy ?: ""
+            (accessibilityProvider?.uiHierarchy ?: "").also { hierarchy ->
+                AppLogger.i(
+                    PAGE_INFO_PROBE_TAG,
+                    "component=UIHierarchyManager event=blocking_end request_id=$requestId " +
+                        "boundary=binder_get_ui_hierarchy result_chars=${hierarchy.length} " +
+                        "elapsed_ms=${SystemClock.elapsedRealtime() - startedAt} " +
+                        "thread=${Thread.currentThread().name} interrupted=${Thread.currentThread().isInterrupted}"
+                )
+            }
         } catch (e: RemoteException) {
+            AppLogger.e(
+                PAGE_INFO_PROBE_TAG,
+                "component=UIHierarchyManager event=blocking_threw request_id=$requestId " +
+                    "boundary=binder_get_ui_hierarchy elapsed_ms=${SystemClock.elapsedRealtime() - startedAt} " +
+                    "thread=${Thread.currentThread().name} interrupted=${Thread.currentThread().isInterrupted}",
+                e
+            )
             AppLogger.e(TAG, "从提供者获取UI层次结构失败", e)
             // Consider re-binding or notifying the user
             ""
@@ -472,14 +516,36 @@ object UIHierarchyManager {
     /**
      * 检查远程无障碍服务是否已在系统设置中启用。
      */
-    suspend fun isAccessibilityServiceEnabled(context: Context): Boolean {
-        if (!ensureBound(context)) {
+    suspend fun isAccessibilityServiceEnabled(context: Context, requestId: String = "none"): Boolean {
+        if (!ensureBound(context, requestId)) {
             AppLogger.w(TAG, "绑定失败，无法检查无障碍服务状态")
             return false
         }
+        val startedAt = SystemClock.elapsedRealtime()
+        AppLogger.i(
+            PAGE_INFO_PROBE_TAG,
+            "component=UIHierarchyManager event=blocking_start request_id=$requestId " +
+                "boundary=binder_get_accessibility_enabled thread=${Thread.currentThread().name} " +
+                "interrupted=${Thread.currentThread().isInterrupted}"
+        )
         return try {
-            accessibilityProvider?.isAccessibilityServiceEnabled ?: false
+            (accessibilityProvider?.isAccessibilityServiceEnabled ?: false).also { enabled ->
+                AppLogger.i(
+                    PAGE_INFO_PROBE_TAG,
+                    "component=UIHierarchyManager event=blocking_end request_id=$requestId " +
+                        "boundary=binder_get_accessibility_enabled enabled=$enabled " +
+                        "elapsed_ms=${SystemClock.elapsedRealtime() - startedAt} " +
+                        "thread=${Thread.currentThread().name} interrupted=${Thread.currentThread().isInterrupted}"
+                )
+            }
         } catch (e: RemoteException) {
+            AppLogger.e(
+                PAGE_INFO_PROBE_TAG,
+                "component=UIHierarchyManager event=blocking_threw request_id=$requestId " +
+                    "boundary=binder_get_accessibility_enabled elapsed_ms=${SystemClock.elapsedRealtime() - startedAt} " +
+                    "thread=${Thread.currentThread().name} interrupted=${Thread.currentThread().isInterrupted}",
+                e
+            )
             AppLogger.e(TAG, "检查无障碍服务状态失败", e)
             false
         }
@@ -488,14 +554,36 @@ object UIHierarchyManager {
     /**
      * 从远程服务获取当前Activity名称。
      */
-    suspend fun getCurrentActivityName(context: Context): String? {
-        if (!ensureBound(context)) {
+    suspend fun getCurrentActivityName(context: Context, requestId: String = "none"): String? {
+        if (!ensureBound(context, requestId)) {
             AppLogger.w(TAG, "绑定失败，无法获取Activity名称")
             return null
         }
+        val startedAt = SystemClock.elapsedRealtime()
+        AppLogger.i(
+            PAGE_INFO_PROBE_TAG,
+            "component=UIHierarchyManager event=blocking_start request_id=$requestId " +
+                "boundary=binder_get_current_activity thread=${Thread.currentThread().name} " +
+                "interrupted=${Thread.currentThread().isInterrupted}"
+        )
         return try {
-            accessibilityProvider?.currentActivityName
+            accessibilityProvider?.currentActivityName.also { activityName ->
+                AppLogger.i(
+                    PAGE_INFO_PROBE_TAG,
+                    "component=UIHierarchyManager event=blocking_end request_id=$requestId " +
+                        "boundary=binder_get_current_activity has_value=${activityName != null} " +
+                        "elapsed_ms=${SystemClock.elapsedRealtime() - startedAt} " +
+                        "thread=${Thread.currentThread().name} interrupted=${Thread.currentThread().isInterrupted}"
+                )
+            }
         } catch (e: RemoteException) {
+            AppLogger.e(
+                PAGE_INFO_PROBE_TAG,
+                "component=UIHierarchyManager event=blocking_threw request_id=$requestId " +
+                    "boundary=binder_get_current_activity elapsed_ms=${SystemClock.elapsedRealtime() - startedAt} " +
+                    "thread=${Thread.currentThread().name} interrupted=${Thread.currentThread().isInterrupted}",
+                e
+            )
             AppLogger.e(TAG, "从提供者获取Activity名称失败", e)
             null
         }

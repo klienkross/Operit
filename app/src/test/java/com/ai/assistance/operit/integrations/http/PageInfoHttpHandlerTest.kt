@@ -3,6 +3,7 @@ package com.ai.assistance.operit.integrations.http
 import com.ai.assistance.operit.core.tools.SimplifiedUINode
 import com.ai.assistance.operit.core.tools.UIPageResultData
 import com.ai.assistance.operit.data.model.ToolResult
+import com.ai.assistance.operit.util.AppLogger
 import fi.iki.elonen.NanoHTTPD
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.CountDownLatch
@@ -16,16 +17,31 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Before
 import org.junit.Test
 import org.mockito.kotlin.mock
 import org.mockito.kotlin.whenever
 import kotlin.system.measureTimeMillis
 
 class PageInfoHttpHandlerTest {
+    private var previousSystemLogEnabled = true
+
+    @Before
+    fun disableAndroidSystemLog() {
+        previousSystemLogEnabled = AppLogger.enableSystemLog
+        AppLogger.enableSystemLog = false
+    }
+
+    @After
+    fun restoreAndroidSystemLog() {
+        AppLogger.enableSystemLog = previousSystemLogEnabled
+    }
+
     @Test
     fun `authenticated GET returns current page info`() {
         val authenticator = ExternalHttpBearerAuthenticator { "secret-token" }

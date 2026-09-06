@@ -3,6 +3,7 @@ package com.ai.assistance.operit.core.tools.defaultTool.accessbility
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.os.SystemClock
 import com.ai.assistance.operit.util.AppLogger
 import com.ai.assistance.operit.core.tools.SimplifiedUINode
 import com.ai.assistance.operit.core.tools.StringResultData
@@ -28,6 +29,7 @@ open class AccessibilityUITools(context: Context) : StandardUITools(context) {
 
     companion object {
         private const val TAG = "AccessibilityUITools"
+        private const val PAGE_INFO_PROBE_TAG = "PageInfoProbe"
         private const val MAX_RETRY_COUNT = 3
         private const val RETRY_DELAY_MS = 300L
     }
@@ -35,15 +37,15 @@ open class AccessibilityUITools(context: Context) : StandardUITools(context) {
     /**
      * 检查无障碍服务是否正在运行
      */
-    private suspend fun isAccessibilityServiceEnabled(): Boolean {
-        return UIHierarchyManager.isAccessibilityServiceEnabled(context)
+    private suspend fun isAccessibilityServiceEnabled(requestId: String): Boolean {
+        return UIHierarchyManager.isAccessibilityServiceEnabled(context, requestId)
     }
 
     /**
      * 为需要无障碍服务的工具创建一个前置检查的包装器
      */
     private suspend fun <T> withAccessibilityCheck(tool: AITool, block: suspend () -> T): T {
-        if (!isAccessibilityServiceEnabled()) {
+        if (!isAccessibilityServiceEnabled(pageInfoProbeRequestId(tool))) {
             throw IllegalStateException("Accessibility Service is not enabled. Please enable it in system settings to use this feature.")
         }
         return block()
@@ -53,12 +55,39 @@ open class AccessibilityUITools(context: Context) : StandardUITools(context) {
      * 获取UI层次结构，失败时重试
      * @return UI层次结构XML字符串，获取失败返回空字符串
      */
-    private suspend fun getUIHierarchyWithRetry(): String {
+    private suspend fun getUIHierarchyWithRetry(requestId: String = "none"): String {
         var retryCount = 0
         var uiXml = ""
 
         while (retryCount < MAX_RETRY_COUNT) {
-            uiXml = UIHierarchyManager.getUIHierarchy(context)
+            val attempt = retryCount + 1
+            val startedAt = SystemClock.elapsedRealtime()
+            AppLogger.i(
+                PAGE_INFO_PROBE_TAG,
+                "component=AccessibilityUITools event=blocking_start request_id=$requestId " +
+                    "boundary=get_ui_hierarchy attempt=$attempt implementation=${javaClass.name} " +
+                    "thread=${Thread.currentThread().name} interrupted=${Thread.currentThread().isInterrupted}"
+            )
+            try {
+                uiXml = UIHierarchyManager.getUIHierarchy(context, requestId)
+            } catch (t: Throwable) {
+                AppLogger.e(
+                    PAGE_INFO_PROBE_TAG,
+                    "component=AccessibilityUITools event=blocking_threw request_id=$requestId " +
+                        "boundary=get_ui_hierarchy attempt=$attempt " +
+                        "elapsed_ms=${SystemClock.elapsedRealtime() - startedAt} " +
+                        "thread=${Thread.currentThread().name} interrupted=${Thread.currentThread().isInterrupted}",
+                    t
+                )
+                throw t
+            }
+            AppLogger.i(
+                PAGE_INFO_PROBE_TAG,
+                "component=AccessibilityUITools event=blocking_end request_id=$requestId " +
+                    "boundary=get_ui_hierarchy attempt=$attempt result_chars=${uiXml.length} " +
+                    "elapsed_ms=${SystemClock.elapsedRealtime() - startedAt} " +
+                    "thread=${Thread.currentThread().name} interrupted=${Thread.currentThread().isInterrupted}"
+            )
             if (uiXml.isNotEmpty()) {
                 return uiXml
             }
@@ -76,6 +105,14 @@ open class AccessibilityUITools(context: Context) : StandardUITools(context) {
 
     /** Gets the current UI page/window information */
     override suspend fun getPageInfo(tool: AITool): ToolResult {
+        val requestId = pageInfoProbeRequestId(tool)
+        val startedAt = SystemClock.elapsedRealtime()
+        AppLogger.i(
+            PAGE_INFO_PROBE_TAG,
+            "component=AccessibilityUITools event=get_page_info_start request_id=$requestId " +
+                "implementation=${javaClass.name} method=AccessibilityUITools.getPageInfo " +
+                "thread=${Thread.currentThread().name} interrupted=${Thread.currentThread().isInterrupted}"
+        )
         return try {
             withAccessibilityCheck(tool) {
         val format = tool.parameters.find { it.name == "format" }?.value ?: "xml"
@@ -88,10 +125,10 @@ open class AccessibilityUITools(context: Context) : StandardUITools(context) {
                     result = StringResultData(""),
                     error = "Invalid format specified. Must be 'xml' or 'json'."
             )
-        }
+            }
 
             // 使用无障碍服务获取UI数据（带重试）
-            val uiXml = getUIHierarchyWithRetry()
+            val uiXml = getUIHierarchyWithRetry(requestId)
             if (uiXml.isEmpty()) {
                     return@withAccessibilityCheck ToolResult(
                         toolName = tool.name,
@@ -102,10 +139,24 @@ open class AccessibilityUITools(context: Context) : StandardUITools(context) {
             }
 
             // 解析当前窗口信息
-            val focusInfo = extractFocusInfoFromAccessibility()
+            val focusStartedAt = SystemClock.elapsedRealtime()
+            AppLogger.i(PAGE_INFO_PROBE_TAG, "component=AccessibilityUITools event=stage_start request_id=$requestId stage=focus_info")
+            val focusInfo = extractFocusInfoFromAccessibility(requestId)
+            AppLogger.i(
+                PAGE_INFO_PROBE_TAG,
+                "component=AccessibilityUITools event=stage_end request_id=$requestId stage=focus_info " +
+                    "elapsed_ms=${SystemClock.elapsedRealtime() - focusStartedAt}"
+            )
 
             // 简化布局信息
+            val parseStartedAt = SystemClock.elapsedRealtime()
+            AppLogger.i(PAGE_INFO_PROBE_TAG, "component=AccessibilityUITools event=stage_start request_id=$requestId stage=simplify_layout")
             val simplifiedLayout = simplifyLayout(uiXml)
+            AppLogger.i(
+                PAGE_INFO_PROBE_TAG,
+                "component=AccessibilityUITools event=stage_end request_id=$requestId stage=simplify_layout " +
+                    "elapsed_ms=${SystemClock.elapsedRealtime() - parseStartedAt}"
+            )
 
             // 创建结构化数据
             val resultData =
@@ -118,6 +169,13 @@ open class AccessibilityUITools(context: Context) : StandardUITools(context) {
             ToolResult(toolName = tool.name, success = true, result = resultData, error = "")
             }
         } catch (e: Exception) {
+            AppLogger.e(
+                PAGE_INFO_PROBE_TAG,
+                "component=AccessibilityUITools event=get_page_info_caught request_id=$requestId " +
+                    "elapsed_ms=${SystemClock.elapsedRealtime() - startedAt} " +
+                    "thread=${Thread.currentThread().name} interrupted=${Thread.currentThread().isInterrupted}",
+                e
+            )
             AppLogger.e(TAG, "Error getting page info", e)
             ToolResult(
                     toolName = tool.name,
@@ -125,27 +183,36 @@ open class AccessibilityUITools(context: Context) : StandardUITools(context) {
                     result = StringResultData(""),
                     error = "Error getting page info: ${e.message}"
             )
+        }.also { result ->
+            AppLogger.i(
+                PAGE_INFO_PROBE_TAG,
+                "component=AccessibilityUITools event=get_page_info_end request_id=$requestId " +
+                    "implementation=${javaClass.name} success=${result.success} " +
+                    "result_type=${result.result.javaClass.name} " +
+                    "elapsed_ms=${SystemClock.elapsedRealtime() - startedAt} " +
+                    "thread=${Thread.currentThread().name} interrupted=${Thread.currentThread().isInterrupted}"
+            )
         }
     }
 
     /** 从无障碍服务获取焦点信息 */
-    private suspend fun extractFocusInfoFromAccessibility(): FocusInfo {
+    private suspend fun extractFocusInfoFromAccessibility(requestId: String): FocusInfo {
         val focusInfo = FocusInfo()
         try {
             // 1. 获取UI层次结构的XML快照（带重试）
-            val hierarchyXml = getUIHierarchyWithRetry()
+            val hierarchyXml = getUIHierarchyWithRetry(requestId)
             if (hierarchyXml.isEmpty()) {
                 AppLogger.w(TAG, "无法获取UI层次结构XML，使用默认值。")
                 focusInfo.packageName = "android"
                 // 即使XML获取失败，仍然尝试获取Activity名称
-                focusInfo.activityName = UIHierarchyManager.getCurrentActivityName(context) ?: "ForegroundActivity"
+                focusInfo.activityName = UIHierarchyManager.getCurrentActivityName(context, requestId) ?: "ForegroundActivity"
                 return focusInfo
             }
 
             // 2. 从XML中解析包名
             val (packageName, _) = UIHierarchyManager.extractWindowInfo(hierarchyXml)
             // 3. 从服务中直接获取当前Activity名称
-            val activityName = UIHierarchyManager.getCurrentActivityName(context)
+            val activityName = UIHierarchyManager.getCurrentActivityName(context, requestId)
 
             focusInfo.packageName = packageName
             focusInfo.activityName = activityName // 使用从服务获取的Activity名称

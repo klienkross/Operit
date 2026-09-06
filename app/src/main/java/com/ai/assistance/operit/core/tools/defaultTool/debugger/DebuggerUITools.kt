@@ -6,6 +6,7 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.os.SystemClock
 import java.io.File
 import com.ai.assistance.operit.util.AppLogger
 import com.ai.assistance.operit.core.tools.SimplifiedUINode
@@ -32,6 +33,7 @@ open class DebuggerUITools(context: Context) : AccessibilityUITools(context) {
 
     companion object {
         private const val TAG = "DebuggerUITools"
+        private const val PAGE_INFO_PROBE_TAG = "PageInfoProbe"
     }
 
     protected open val uiShellIdentity: ShellIdentity? = null
@@ -543,10 +545,65 @@ open class DebuggerUITools(context: Context) : AccessibilityUITools(context) {
 
     /** 使用Shell命令获取页面信息 */
     override suspend fun getPageInfo(tool: AITool): ToolResult {
-        if (!hasDisplayParam(tool) && UIHierarchyManager.isAccessibilityServiceEnabled(context)) {
-            AppLogger.d(TAG, "无障碍服务已启用，使用无障碍获取页面信息")
-            return super.getPageInfo(tool)
+        val requestId = pageInfoProbeRequestId(tool)
+        val startedAt = SystemClock.elapsedRealtime()
+        val hasDisplay = hasDisplayParam(tool)
+        AppLogger.i(
+            PAGE_INFO_PROBE_TAG,
+            "component=DebuggerUITools event=get_page_info_start request_id=$requestId " +
+                "implementation=${javaClass.name} method=DebuggerUITools.getPageInfo has_display=$hasDisplay " +
+                "thread=${Thread.currentThread().name} interrupted=${Thread.currentThread().isInterrupted}"
+        )
+
+        val accessibilityEnabled = if (!hasDisplay) {
+            val checkStartedAt = SystemClock.elapsedRealtime()
+            AppLogger.i(
+                PAGE_INFO_PROBE_TAG,
+                "component=DebuggerUITools event=blocking_start request_id=$requestId " +
+                    "boundary=check_accessibility_enabled thread=${Thread.currentThread().name} " +
+                    "interrupted=${Thread.currentThread().isInterrupted}"
+            )
+            try {
+                UIHierarchyManager.isAccessibilityServiceEnabled(context, requestId).also { enabled ->
+                    AppLogger.i(
+                        PAGE_INFO_PROBE_TAG,
+                        "component=DebuggerUITools event=blocking_end request_id=$requestId " +
+                            "boundary=check_accessibility_enabled enabled=$enabled " +
+                            "elapsed_ms=${SystemClock.elapsedRealtime() - checkStartedAt} " +
+                            "thread=${Thread.currentThread().name} interrupted=${Thread.currentThread().isInterrupted}"
+                    )
+                }
+            } catch (t: Throwable) {
+                AppLogger.e(
+                    PAGE_INFO_PROBE_TAG,
+                    "component=DebuggerUITools event=blocking_threw request_id=$requestId " +
+                        "boundary=check_accessibility_enabled elapsed_ms=${SystemClock.elapsedRealtime() - checkStartedAt} " +
+                        "thread=${Thread.currentThread().name} interrupted=${Thread.currentThread().isInterrupted}",
+                    t
+                )
+                throw t
+            }
+        } else {
+            false
         }
+
+        if (accessibilityEnabled) {
+            AppLogger.d(TAG, "无障碍服务已启用，使用无障碍获取页面信息")
+            AppLogger.i(
+                PAGE_INFO_PROBE_TAG,
+                "component=DebuggerUITools event=path_selected request_id=$requestId path=accessibility " +
+                    "implementation=${javaClass.name}"
+            )
+            return super.getPageInfo(tool).also { result ->
+                logPageInfoEnd(requestId, startedAt, result, "accessibility")
+            }
+        }
+
+        AppLogger.i(
+            PAGE_INFO_PROBE_TAG,
+            "component=DebuggerUITools event=path_selected request_id=$requestId path=shizuku_shell " +
+                "implementation=${javaClass.name}"
+        )
 
         val format = tool.parameters.find { it.name == "format" }?.value ?: "xml"
         // detail kept for future use
@@ -558,26 +615,33 @@ open class DebuggerUITools(context: Context) : AccessibilityUITools(context) {
                     success = false,
                     result = StringResultData(""),
                     error = "Invalid format specified. Must be 'xml' or 'json'."
-            )
+            ).also { result -> logPageInfoEnd(requestId, startedAt, result, "shizuku_shell") }
         }
 
         return try {
             // 获取UI数据
-            val uiData = getUIDataFromShell(tool)
+            val uiData = getUIDataFromShell(tool, requestId)
             if (uiData == null) {
                 return ToolResult(
                         toolName = tool.name,
                         success = false,
                         result = StringResultData(""),
                         error = "Failed to retrieve UI data."
-                )
+                ).also { result -> logPageInfoEnd(requestId, startedAt, result, "shizuku_shell") }
             }
 
             // 解析当前窗口信息
+            val parseStartedAt = SystemClock.elapsedRealtime()
+            AppLogger.i(PAGE_INFO_PROBE_TAG, "component=DebuggerUITools event=stage_start request_id=$requestId stage=parse_result")
             val focusInfo = extractFocusInfoFromShell(uiData.windowInfo)
 
             // 简化布局信息
             val simplifiedLayout = simplifyLayoutFromXml(uiData.uiXml)
+            AppLogger.i(
+                PAGE_INFO_PROBE_TAG,
+                "component=DebuggerUITools event=stage_end request_id=$requestId stage=parse_result " +
+                    "elapsed_ms=${SystemClock.elapsedRealtime() - parseStartedAt}"
+            )
 
             // 创建结构化数据
             val resultData =
@@ -589,6 +653,13 @@ open class DebuggerUITools(context: Context) : AccessibilityUITools(context) {
 
             ToolResult(toolName = tool.name, success = true, result = resultData, error = "")
         } catch (e: Exception) {
+            AppLogger.e(
+                PAGE_INFO_PROBE_TAG,
+                "component=DebuggerUITools event=get_page_info_caught request_id=$requestId " +
+                    "elapsed_ms=${SystemClock.elapsedRealtime() - startedAt} " +
+                    "thread=${Thread.currentThread().name} interrupted=${Thread.currentThread().isInterrupted}",
+                e
+            )
             AppLogger.e(TAG, "Error getting page info", e)
             ToolResult(
                     toolName = tool.name,
@@ -596,14 +667,27 @@ open class DebuggerUITools(context: Context) : AccessibilityUITools(context) {
                     result = StringResultData(""),
                     error = "Error getting page info: ${e.message}"
             )
+        }.also { result ->
+            logPageInfoEnd(requestId, startedAt, result, "shizuku_shell")
         }
+    }
+
+    private fun logPageInfoEnd(requestId: String, startedAt: Long, result: ToolResult, path: String) {
+        AppLogger.i(
+            PAGE_INFO_PROBE_TAG,
+            "component=DebuggerUITools event=get_page_info_end request_id=$requestId path=$path " +
+                "implementation=${javaClass.name} success=${result.success} " +
+                "result_type=${result.result.javaClass.name} " +
+                "elapsed_ms=${SystemClock.elapsedRealtime() - startedAt} " +
+                "thread=${Thread.currentThread().name} interrupted=${Thread.currentThread().isInterrupted}"
+        )
     }
 
     /** UI数据类，保存XML和窗口信息 */
     private data class UIData(val uiXml: String, val windowInfo: String)
 
     /** 获取UI数据，使用Shell命令，严格遵守工具参数中的 display（如有） */
-    private suspend fun getUIDataFromShell(tool: AITool): UIData? {
+    private suspend fun getUIDataFromShell(tool: AITool, requestId: String): UIData? {
         return try {
             // 使用ADB命令获取UI dump
             AppLogger.d(TAG, "使用ADB命令获取UI数据")
@@ -618,14 +702,22 @@ open class DebuggerUITools(context: Context) : AccessibilityUITools(context) {
             var dumpResult = if (displayId != null) {
                 val cmd = "uiautomator dump --display-id $displayId /sdcard/window_dump.xml"
                 AppLogger.d(TAG, "UI dump using explicit display-id=$displayId")
-                executeUiShellCommand(cmd)
+                executePageInfoShellCommand(requestId, "uiautomator_dump_display", cmd)
             } else {
-                executeUiShellCommand("uiautomator dump /sdcard/window_dump.xml")
+                executePageInfoShellCommand(
+                    requestId,
+                    "uiautomator_dump",
+                    "uiautomator dump /sdcard/window_dump.xml"
+                )
             }
 
             if (!dumpResult.success && displayId != null) {
                 AppLogger.w(TAG, "uiautomator dump with explicit display-id failed, falling back: ${dumpResult.stderr}")
-                dumpResult = executeUiShellCommand("uiautomator dump /sdcard/window_dump.xml")
+                dumpResult = executePageInfoShellCommand(
+                    requestId,
+                    "uiautomator_dump_without_display",
+                    "uiautomator dump /sdcard/window_dump.xml"
+                )
             }
 
             if (!dumpResult.success) {
@@ -635,20 +727,24 @@ open class DebuggerUITools(context: Context) : AccessibilityUITools(context) {
             AppLogger.d(TAG, "uiautomator dump成功: ${dumpResult.stdout}")
 
             // 读取dump文件内容
-            val readResult = executeUiShellCommand("cat /sdcard/window_dump.xml")
+            val readResult = executePageInfoShellCommand(
+                requestId,
+                "read_window_dump",
+                "cat /sdcard/window_dump.xml"
+            )
             if (!readResult.success) {
                 AppLogger.e(TAG, "读取UI dump文件失败: ${readResult.stderr}")
                 return null
             }
 
             // 获取窗口信息
-            var windowInfo = getWindowInfoFromShell()
+            var windowInfo = getWindowInfoFromShell(requestId)
 
             // 如果窗口信息为空，尝试延迟后重试一次
             if (windowInfo.isEmpty()) {
                 AppLogger.w(TAG, "首次获取窗口信息失败，延迟500ms后重试")
                 kotlinx.coroutines.delay(500)
-                windowInfo = getWindowInfoFromShell()
+                windowInfo = getWindowInfoFromShell(requestId)
             }
 
             UIData(readResult.stdout, windowInfo)
@@ -659,7 +755,7 @@ open class DebuggerUITools(context: Context) : AccessibilityUITools(context) {
     }
 
     /** 获取窗口信息，使用多种命令尝试 */
-    private suspend fun getWindowInfoFromShell(): String {
+    private suspend fun getWindowInfoFromShell(requestId: String): String {
         // 尝试多种命令来获取窗口信息
         val commands =
                 listOf(
@@ -678,7 +774,7 @@ open class DebuggerUITools(context: Context) : AccessibilityUITools(context) {
         // 依次尝试每个命令，直到有一个成功
         for (command in commands) {
             try {
-                val result = executeUiShellCommand(command)
+                val result = executePageInfoShellCommand(requestId, "window_info_${commands.indexOf(command) + 1}", command)
                 if (result.success && result.stdout.isNotEmpty()) {
                     AppLogger.d(TAG, "成功获取窗口信息: ${result.stdout.take(100)}")
                     return result.stdout
@@ -695,7 +791,7 @@ open class DebuggerUITools(context: Context) : AccessibilityUITools(context) {
         try {
             val topActivityCommand =
                     "dumpsys activity activities | grep -E 'topResumedActivity|topActivity'"
-            val result = executeUiShellCommand(topActivityCommand)
+            val result = executePageInfoShellCommand(requestId, "top_activity", topActivityCommand)
             if (result.success && result.stdout.isNotEmpty()) {
                 AppLogger.d(TAG, "使用topActivity作为窗口信息替代: ${result.stdout.take(100)}")
                 return result.stdout
@@ -706,6 +802,41 @@ open class DebuggerUITools(context: Context) : AccessibilityUITools(context) {
 
         AppLogger.e(TAG, "所有获取窗口信息的尝试均失败")
         return ""
+    }
+
+    private suspend fun executePageInfoShellCommand(
+        requestId: String,
+        step: String,
+        command: String
+    ): AndroidShellExecutor.CommandResult {
+        val startedAt = SystemClock.elapsedRealtime()
+        AppLogger.i(
+            PAGE_INFO_PROBE_TAG,
+            "component=DebuggerUITools event=blocking_start request_id=$requestId " +
+                "boundary=shell_command step=$step implementation=${javaClass.name} " +
+                "identity=${uiShellIdentity ?: ShellIdentity.DEFAULT} thread=${Thread.currentThread().name} " +
+                "interrupted=${Thread.currentThread().isInterrupted}"
+        )
+        return try {
+            executeUiShellCommand(command).also { result ->
+                AppLogger.i(
+                    PAGE_INFO_PROBE_TAG,
+                    "component=DebuggerUITools event=blocking_end request_id=$requestId " +
+                        "boundary=shell_command step=$step success=${result.success} exit_code=${result.exitCode} " +
+                        "elapsed_ms=${SystemClock.elapsedRealtime() - startedAt} " +
+                        "thread=${Thread.currentThread().name} interrupted=${Thread.currentThread().isInterrupted}"
+                )
+            }
+        } catch (t: Throwable) {
+            AppLogger.e(
+                PAGE_INFO_PROBE_TAG,
+                "component=DebuggerUITools event=blocking_threw request_id=$requestId " +
+                    "boundary=shell_command step=$step elapsed_ms=${SystemClock.elapsedRealtime() - startedAt} " +
+                    "thread=${Thread.currentThread().name} interrupted=${Thread.currentThread().isInterrupted}",
+                t
+            )
+            throw t
+        }
     }
 
     /** UI节点数据类，仅在Shell实现中使用 */
