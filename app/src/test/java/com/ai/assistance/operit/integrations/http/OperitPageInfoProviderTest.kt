@@ -5,24 +5,21 @@ import com.ai.assistance.operit.core.tools.StringResultData
 import com.ai.assistance.operit.core.tools.UIPageResultData
 import com.ai.assistance.operit.data.model.ToolResult
 import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.ExperimentalCoroutinesApi
-import kotlinx.coroutines.test.currentTime
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
-@OptIn(ExperimentalCoroutinesApi::class)
 class OperitPageInfoProviderTest {
     @Test
     fun `page info read is bounded at the real await boundary`() = runTest {
-        val provider = OperitPageInfoProvider {
+        val provider = OperitPageInfoProvider(timeoutMillis = 25L) {
             CompletableDeferred<ToolResult>().await()
         }
 
         val result = provider.getCurrentPageInfo()
 
         assertEquals(PageInfoProviderResult.Unavailable, result)
-        assertEquals(OperitPageInfoProvider.PAGE_INFO_TIMEOUT_MS, currentTime)
+        provider.close()
     }
 
     @Test
