@@ -10,6 +10,8 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.jsonObject
@@ -161,16 +163,18 @@ class PageInfoHttpHandlerTest {
             )
         )
         val provider = OperitPageInfoProvider(timeoutMillis = 250L) {
-            if (readCalls.incrementAndGet() == 1) {
-                while (releaseFirstRead.count > 0) {
-                    try {
-                        releaseFirstRead.await()
-                    } catch (_: InterruptedException) {
-                        // Models a backend that ignores Future.cancel(true).
+            withContext(Dispatchers.IO) {
+                if (readCalls.incrementAndGet() == 1) {
+                    while (releaseFirstRead.count > 0) {
+                        try {
+                            releaseFirstRead.await()
+                        } catch (_: InterruptedException) {
+                            // Models a dispatched backend that ignores cancellation/interrupt.
+                        }
                     }
                 }
+                ToolResult("get_page_info", true, hostResult)
             }
-            ToolResult("get_page_info", true, hostResult)
         }
         val handler = PageInfoHttpHandler(provider, requireBearerToken = { null })
         val requestExecutor = Executors.newSingleThreadExecutor()
