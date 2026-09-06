@@ -42,7 +42,7 @@ class ExternalChatHttpServer(
     context: Context,
     private val preferences: ExternalHttpApiPreferences,
     private val serviceScope: CoroutineScope,
-    pageInfoProvider: PageInfoProvider = OperitPageInfoProvider(context)
+    private val pageInfoProvider: PageInfoProvider = OperitPageInfoProvider(context)
 ) : NanoHTTPD(LISTEN_HOST, preferences.getPort()) {
 
     private val appContext = context.applicationContext
@@ -70,6 +70,7 @@ class ExternalChatHttpServer(
             return
         }
         a2aHandler.close()
+        (pageInfoProvider as? AutoCloseable)?.close()
         stop()
         running.set(false)
         AppLogger.i(TAG, "External HTTP chat server stopped")
